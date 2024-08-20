@@ -87,13 +87,29 @@ class AntTSP(mesa.Agent):
         Customize the agent
         """
         self.unique_id = unique_id
-        self.alpha = alpha
-        self.beta = beta
+        self._alpha = alpha
+        self._beta = beta
         super().__init__(unique_id, model)
         self._cities_visited = []
         self._traveled_distance = 0
         self.tsp_solution = []
         self.tsp_distance = 0
+
+    @property
+    def alpha(self):
+        return self._alpha
+
+    @alpha.setter
+    def alpha(self, value):
+        self._alpha = value
+
+    @property
+    def beta(self):
+        return self._beta
+
+    @beta.setter
+    def beta(self, value):
+        self._beta = value
 
     def calculate_pheromone_delta(self, q: float = 100):
         results = {}
@@ -179,20 +195,26 @@ class AcoTspModel(mesa.Model):
         self.schedule = mesa.time.RandomActivation(self)
         self.grid = mesa.space.NetworkGrid(tsp_graph.g)
 
+        self.initialize_agents(ant_alpha, ant_beta)
+        self.initialize_data_collection()
+        # Re-initialize pheromone levels
+        self.tsp_graph._add_edge_properties()
+        self.running = True
+
+    def initialize_agents(self, ant_alpha: float, ant_beta: float) -> None:
         for i in range(self.num_agents):
             agent = AntTSP(unique_id=i, model=self, alpha=ant_alpha, beta=ant_beta)
             self.schedule.add(agent)
 
-            city = tsp_graph.cities[self.random.randrange(self.num_cities)]
+            city = self.tsp_graph.cities[self.random.randrange(self.num_cities)]
             self.grid.place_agent(agent, city)
             agent._cities_visited.append(city)
 
+    def initialize_data_collection(self) -> None:
         self.num_steps = 0
         self.best_path = None
         self.best_distance = float("inf")
         self.best_distance_iter = float("inf")
-        # Re-initialize pheromone levels
-        tsp_graph._add_edge_properties()
 
         self.datacollector = mesa.datacollection.DataCollector(
             model_reporters={
@@ -206,8 +228,6 @@ class AcoTspModel(mesa.Model):
                 "tsp_solution": "tsp_solution",
             },
         )
-
-        self.running = True
 
     def update_pheromone(self, q: float = 100, ro: float = 0.5):
         # tau_ij(t+1) = (1-ro)*tau_ij(t) + delta_tau_ij(t)
@@ -225,15 +245,7 @@ class AcoTspModel(mesa.Model):
 
             self.grid.G[i][j]["pheromone"] = tau_ij
 
-    def step(self):
-        """
-        A model step. Used for collecting data and advancing the schedule
-        """
-        self.datacollector.collect(self)
-        self.schedule.step()
-        self.num_steps += 1
-        self.update_pheromone()
-
+    def collect_data(self):
         # Check len of cities visited by an agent
         best_instance_iter = float("inf")
         for agent in self.schedule.agents:
@@ -247,5 +259,118 @@ class AcoTspModel(mesa.Model):
 
         self.best_distance_iter = best_instance_iter
 
+    def step(self):
+        """
+        A model step. Used for collecting data and advancing the schedule
+        """
+        self.datacollector.collect(self)
+        self.schedule.step()
+        self.num_steps += 1
+        self.update_pheromone()
+        self.collect_data()
+
         if self.num_steps >= self.max_steps:
             self.running = False
+
+
+class EvoAntTspModel(AcoTspModel):
+    def __init__(
+        self,
+        num_agents: int = 20,
+        num_winners: int = 5,
+        tsp_graph: TSPGraph = TSPGraph.from_random(20),
+        max_steps: int = int(1e6),
+        alpha_mean: float = 1.0,
+        beta_mean: float = 5.0,
+        noise_std: float = 1.0,
+    ):
+        # Call super of base's base class
+        mesa.Model.__init__(self)
+        self.num_agents = num_agents
+        self.num_winners = num_winners
+        assert (
+            num_agents % num_winners == 0
+        ), "num_agents must be divisible by num_winners"
+        self.offspring_per_winner = num_agents // num_winners
+
+        self.tsp_graph = tsp_graph
+        self.num_cities = tsp_graph.num_cities
+        self.all_cities = set(range(self.num_cities))
+        self.max_steps = max_steps
+        self.schedule = mesa.time.RandomActivation(self)
+        self.grid = mesa.space.NetworkGrid(tsp_graph.g)
+
+        self.alpha_mean = alpha_mean
+        self.beta_mean = beta_mean
+        self.noise_std = noise_std
+        self.initialize_agents()
+        self.initialize_data_collection()
+        # Re-initialize pheromone levels
+        self.tsp_graph._add_edge_properties()
+        self.running = True
+
+    def initialize_agents(self) -> None:
+        for i in range(self.num_agents):
+            ant_alpha = np.random.normal(loc=self.alpha_mean, scale=0.1)
+            ant_beta = np.random.normal(loc=self.beta_mean, scale=0.1)
+            agent = AntTSP(unique_id=i, model=self, alpha=ant_alpha, beta=ant_beta)
+            self.schedule.add(agent)
+
+            city = self.tsp_graph.cities[self.random.randrange(self.num_cities)]
+            self.grid.place_agent(agent, city)
+            agent._cities_visited.append(city)
+
+    def initialize_data_collection(self) -> None:
+        self.num_steps = 0
+        self.best_path = None
+        self.best_distance = float("inf")
+        self.best_distance_iter = float("inf")
+
+        self.datacollector = mesa.datacollection.DataCollector(
+            model_reporters={
+                "num_steps": "num_steps",
+                "best_distance": "best_distance",
+                "best_distance_iter": "best_distance_iter",
+                "best_path": "best_path",
+                "alpha_mean_sample": "alpha_mean_sample",
+                "beta_mean_sample": "beta_mean_sample",
+            },
+            agent_reporters={
+                "tsp_distance": "tsp_distance",
+                "tsp_solution": "tsp_solution",
+                "alpha": "alpha",
+                "beta": "beta",
+            },
+        )
+
+    def collect_data(self):
+        super().collect_data()
+        self.alpha_mean_sample = np.mean(
+            [agent.alpha for agent in self.schedule.agents]
+        )
+        self.beta_mean_sample = np.mean([agent.beta for agent in self.schedule.agents])
+
+    def select_winners(self):
+        # Sort agents by their performance and select the top num_winners
+        winning_agents = sorted(self.schedule.agents, key=lambda x: x.tsp_distance)
+        return winning_agents[: self.num_winners]
+
+    def reproduce_and_mutate(self, winning_agents):
+        # Create offspring for each winner
+        for winner_idx, winner in enumerate(winning_agents):
+            for off_idx in range(self.offspring_per_winner):
+                # Mutate: if parent mean is mean_p, then child mean is mean_c = mean_p + N(0, 1)
+                alpha = np.random.normal(loc=winner.alpha, scale=self.noise_std)
+                beta = np.random.normal(loc=winner.beta, scale=self.noise_std)
+                agent_idx = winner_idx * self.offspring_per_winner + off_idx
+                # Update agent params
+                agent = self.schedule.agents[agent_idx]
+                agent.alpha = alpha
+                agent.beta = beta
+
+    def step(self):
+        super().step()
+        # self.update_agent_params()
+        # Evolution
+        winning_agents = self.select_winners()
+        self.reproduce_and_mutate(winning_agents)

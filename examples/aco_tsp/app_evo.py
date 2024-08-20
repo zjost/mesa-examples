@@ -2,9 +2,11 @@
 Configure visualization elements and instantiate a server
 """
 
+from functools import partial
+
 import networkx as nx
 import solara
-from aco_tsp.model import AcoTspModel, TSPGraph
+from aco_tsp.model import EvoAntTspModel, TSPGraph
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
 
@@ -17,21 +19,30 @@ tsp_graph = TSPGraph.from_tsp_file("aco_tsp/data/kroA100.tsp")
 model_params = {
     "num_agents": tsp_graph.num_cities,
     "tsp_graph": tsp_graph,
-    "ant_alpha": {
+    "num_winners": tsp_graph.num_cities // 5,
+    "alpha_mean": {
         "type": "SliderFloat",
         "value": 1.0,
-        "label": "Alpha: pheromone exponent",
+        "label": "Alpha mean: pheromone exponent",
         "min": 0.0,
         "max": 10.0,
         "step": 0.1,
     },
-    "ant_beta": {
+    "beta_mean": {
         "type": "SliderFloat",
         "value": 5.0,
-        "label": "Beta: heuristic exponent",
+        "label": "Beta mean: heuristic exponent",
         "min": 0.0,
         "max": 10.0,
         "step": 0.1,
+    },
+    "noise_std": {
+        "type": "SliderFloat",
+        "value": 0.1,
+        "label": "Noise std",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
     },
 }
 
@@ -56,7 +67,7 @@ def best_distance_from_optimal(model):
         ylabel="Distance",
     )
     ax.plot(
-        model.datacollector.get_model_vars_dataframe()["best_distance"] - opt_distance,
+        model.datacollector.get_model_vars_dataframe()["best_distance"] - 21282,
         marker="o",
         ms=3,
     )
@@ -86,6 +97,17 @@ def make_graph(model):
     solara.FigureMatplotlib(fig)
 
 
+def make_histogram(model, param_name):
+    fig = Figure()
+    ax = fig.subplots()
+    ax.set_title(f"{param_name} histogram")
+    # Get last iteration's alpha values
+    parm_values = [getattr(agent, param_name) for agent in model.schedule.agents]
+    ax.hist(parm_values, bins=20, color="blue", alpha=0.7, rwidth=0.85)
+    ax.set(ylim=(0, model.num_agents), xlabel=param_name)
+    solara.FigureMatplotlib(fig)
+
+
 def ant_level_distances(model):
     # ant_distances = model.datacollector.get_agent_vars_dataframe()
     # Plot so that the step index is the x-axis, there's a line for each agent,
@@ -95,10 +117,18 @@ def ant_level_distances(model):
 
 
 page = SolaraViz(
-    AcoTspModel,
+    EvoAntTspModel,
     model_params,
     space_drawer=None,
-    measures=["best_distance_iter", best_distance_from_optimal, make_graph],
+    measures=[
+        "best_distance_iter",
+        best_distance_from_optimal,
+        "alpha_mean_sample",
+        "beta_mean_sample",
+        partial(make_histogram, param_name="alpha"),
+        partial(make_histogram, param_name="beta"),
+        make_graph,
+    ],
     agent_portrayal=circle_portrayal_example,
     play_interval=1,
 )
