@@ -4,7 +4,7 @@ Configure visualization elements and instantiate a server
 
 import networkx as nx
 import solara
-from aco_tsp.model import AcoTspModel, TSPGraph
+from aco_tsp.model import ACOTspModel, TSPGraph  # AntSystemTspModel
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
 
@@ -13,7 +13,12 @@ def circle_portrayal_example(agent):
     return {"node_size": 20, "width": 0.1}
 
 
-tsp_graph = TSPGraph.from_tsp_file("aco_tsp/data/kroA100.tsp")
+# pheromone_init = 1/(n*Lnn)
+l_nn = 24_225
+pheromone_init = 1 / (100 * l_nn)
+tsp_graph = TSPGraph.from_tsp_file(
+    "aco_tsp/data/kroA100.tsp", pheromone_init=pheromone_init
+)
 model_params = {
     "num_agents": tsp_graph.num_cities,
     "tsp_graph": tsp_graph,
@@ -31,6 +36,14 @@ model_params = {
         "label": "Beta: heuristic exponent",
         "min": 0.0,
         "max": 10.0,
+        "step": 0.1,
+    },
+    "ant_q_0": {
+        "type": "SliderFloat",
+        "value": 0.9,
+        "label": "q_0: probability of exploitation",
+        "min": 0.0,
+        "max": 1.0,
         "step": 0.1,
     },
 }
@@ -95,7 +108,8 @@ def ant_level_distances(model):
 
 
 page = SolaraViz(
-    AcoTspModel,
+    # AntSystemTspModel,
+    ACOTspModel,
     model_params,
     space_drawer=None,
     measures=["best_distance_iter", best_distance_from_optimal, make_graph],

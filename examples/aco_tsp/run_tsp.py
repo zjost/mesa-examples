@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
-from aco_tsp.model import AcoTspModel, TSPGraph
+from aco_tsp.model import AntSystemTspModel, TSPGraph
 
 
 def main():
@@ -18,7 +18,7 @@ def main():
     best_path = None
     best_distance = float("inf")
 
-    model = AcoTspModel(**model_params)
+    model = AntSystemTspModel(**model_params)
 
     for e in range(number_of_episodes):
         # model = AcoTspModel(**model_params)
