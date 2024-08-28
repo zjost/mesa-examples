@@ -10,14 +10,15 @@ import numpy as np
 
 @dataclass
 class NodeCoordinates:
+    idx: int
     city: int
     x: float
     y: float
 
     @classmethod
-    def from_line(cls, line: str):
+    def from_line(cls, line: str, idx: int):
         city, x, y = line.split()
-        return cls(int(city), float(x), float(y))
+        return cls(idx, int(city), float(x), float(y))
 
 
 class TSPGraph:
@@ -39,12 +40,6 @@ class TSPGraph:
         return self._cities
 
     @property
-    def city2idx(self):
-        if self._city2idx is None:
-            self._city2idx = {city: idx for idx, city in enumerate(self.cities)}
-        return self._city2idx
-
-    @property
     def num_cities(self):
         return len(self.cities)
 
@@ -55,6 +50,10 @@ class TSPGraph:
     @property
     def pheromone(self):
         return self._pheromone
+
+    def update_pheromone(self, i, j, value):
+        self._pheromone[i][j] = value
+        self._pheromone[j][i] = value
 
     def _add_edge_properties(self):
         self._visibility = np.zeros((self.num_cities, self.num_cities))
@@ -67,8 +66,8 @@ class TSPGraph:
             v_x, v_y = self.g.nodes[v]["pos"]
             distance = ((u_x - v_x) ** 2 + (u_y - v_y) ** 2) ** 0.5
             self.g[u][v]["distance"] = distance
-            self._visibility[self.city2idx[u]][self.city2idx[v]] = 1 / distance
-            self._visibility[self.city2idx[v]][self.city2idx[u]] = 1 / distance
+            self._visibility[u][v] = 1 / distance
+            self._visibility[v][u] = 1 / distance
             # self.g[u][v]["visibility"] = 1 / self.g[u][v]["distance"]
             # self.g[u][v]["int_distance"] = int(self.g[u][v]["distance"] + 0.5)
             # self.g[u][v]["pheromone"] = self.pheromone_init
@@ -88,13 +87,15 @@ class TSPGraph:
                 pass
 
             g = nx.Graph()
-            for line in lines:
+            for idx, line in enumerate(lines):
                 if line.strip() == "EOF":
                     break
-                node_coordinate = NodeCoordinates.from_line(line)
+                node_coordinate = NodeCoordinates.from_line(line, idx)
 
                 g.add_node(
-                    node_coordinate.city, pos=(node_coordinate.x, node_coordinate.y)
+                    node_coordinate.idx,  # node id will be the idx
+                    city_id=node_coordinate.city,  # this property will store the integer city id
+                    pos=(node_coordinate.x, node_coordinate.y),
                 )
 
         # Add edges between all nodes to make a complete graph
@@ -178,8 +179,9 @@ class AntTSP(mesa.Agent):
         self.three_opt_iters = three_opt_iters
         super().__init__(unique_id, model)
         self._cities_visited = []
+        self._cities_not_visited = set(model.tsp_graph.cities)
         self._traveled_distance = 0
-        self.tsp_solution = range(model.num_cities)
+        self.tsp_solution = model.tsp_graph.cities
         self.tsp_distance = float("inf")
 
     @property
@@ -210,29 +212,15 @@ class AntTSP(mesa.Agent):
     def decide_next_city(self):
         pheromone = self.model.tsp_graph.pheromone
         visibility = self.model.tsp_graph.visibility
-        city2idx = self.model.tsp_graph.city2idx
 
         current_city = self.pos
-        # neighbors = list(g.neighbors(current_city))
-        neighbors = self.model.tsp_graph.cities
-        candidates = [n for n in neighbors if n not in self._cities_visited]
-        candidates_idx = [city2idx[c] for c in candidates]
+        candidates = list(self._cities_not_visited)
         if len(candidates) == 0:
             return current_city
 
-        # p_ij(t) = 1/Z*[(tau_ij)**alpha * (1/distance)**beta]
-        # results = []
-        # for city in candidates:
-        #     val = (
-        #         (g[current_city][city]["pheromone"]) ** self.alpha
-        #         * (g[current_city][city]["visibility"]) ** self.beta
-        #     )
-        #     results.append(val)
-
-        # results = np.array(results)
         results = (
-            pheromone[city2idx[current_city]][candidates_idx] ** self.alpha
-            * visibility[city2idx[current_city]][candidates_idx] ** self.beta
+            pheromone[current_city][candidates] ** self.alpha
+            * visibility[current_city][candidates] ** self.beta
         )
 
         norm = results.sum()
@@ -249,33 +237,19 @@ class AntTSP(mesa.Agent):
         ro = self.model.ro
         tau_0 = self.model.tsp_graph.pheromone_init
 
-        city2idx = self.model.tsp_graph.city2idx
-
-        # g[current_city][new_city]["pheromone"] = (1 - ro) * g[current_city][new_city][
-        #     "pheromone"
-        # ] + ro * tau_0
-
-        old_pheromone = self.model.tsp_graph.pheromone[city2idx[current_city]][
-            city2idx[new_city]
-        ]
+        old_pheromone = self.model.tsp_graph.pheromone[current_city][new_city]
         new_pheromone = (1 - ro) * old_pheromone + ro * tau_0
 
-        self.model.tsp_graph._pheromone[city2idx[current_city], city2idx[new_city]] = (
-            new_pheromone
-        )
-        self.model.tsp_graph._pheromone[city2idx[new_city], city2idx[current_city]] = (
-            new_pheromone
-        )
+        self.model.tsp_graph.update_pheromone(current_city, new_city, new_pheromone)
 
     def init_agent(self):
-        city = self.model.tsp_graph.cities[
-            self.model.random.randrange(self.model.num_cities)
-        ]
-        if self.pos:
+        city = self.model.random.choice(self.model.tsp_graph.cities)
+        if self.pos is not None:
             self.model.grid.move_agent(self, city)
         else:
             self.model.grid.place_agent(self, city)
         self._cities_visited = [city]
+        self._cities_not_visited = set(self.model.tsp_graph.cities) - {city}
         self._traveled_distance = 0
 
     def step(self):
@@ -289,6 +263,7 @@ class AntTSP(mesa.Agent):
             current_city = self.pos
             new_city = self.decide_next_city()
             self._cities_visited.append(new_city)
+            self._cities_not_visited.remove(new_city)
             self.model.grid.move_agent(self, new_city)
             if self.aco_flag:
                 self.local_update(g, current_city, new_city)
@@ -410,12 +385,12 @@ class AntSystemTspModel(mesa.Model):
 
         for i, j in self.grid.G.edges():
             # Evaporate
-            tau_ij = (1 - self.ro) * self.grid.G[i][j]["pheromone"]
+            tau_ij = (1 - self.ro) * self.tsp_graph.pheromone[i][j]
             # Add ant's contribution
             for k, delta_tau_ij_k in delta_tau_ij.items():
                 tau_ij += delta_tau_ij_k.get((i, j), 0.0)
 
-            self.grid.G[i][j]["pheromone"] = tau_ij
+            self.tsp_graph.update_pheromone(i, j, tau_ij)
 
     def collect_data(self):
         # Check len of cities visited by an agent
@@ -468,18 +443,15 @@ class ACOTspModel(AntSystemTspModel):
         delta_tau_ij = calculate_pheromone_delta(
             self.best_path, self.best_distance, q=1.0
         )
-        city2idx = self.tsp_graph.city2idx
 
         for i, j in delta_tau_ij:
             # Evaporate
             # tau_ij = (1 - self.ro) * self.grid.G[i][j]["pheromone"]
-            tau_ij = (1 - self.ro) * self.tsp_graph.pheromone[city2idx[i]][city2idx[j]]
+            tau_ij = (1 - self.ro) * self.tsp_graph.pheromone[i][j]
             # Add ant's contribution
             tau_ij += self.ro * delta_tau_ij[(i, j)]
 
-            # self.grid.G[i][j]["pheromone"] = tau_ij
-            self.tsp_graph.pheromone[city2idx[i]][city2idx[j]] = tau_ij
-            self.tsp_graph.pheromone[city2idx[j]][city2idx[i]] = tau_ij
+            self.tsp_graph.update_pheromone(i, j, tau_ij)
 
 
 class EvoAntTspModel(ACOTspModel):

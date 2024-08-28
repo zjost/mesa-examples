@@ -93,11 +93,7 @@ def make_graph(model):
     ax.set_title("Cities and pheromone trails")
     graph = model.grid.G
     pos = model.tsp_graph.pos
-    # weights = [graph[u][v]["pheromone"] for u, v in graph.edges()]
-    city2idx = model.tsp_graph.city2idx
-    weights = [
-        model.tsp_graph.pheromone[city2idx[u]][city2idx[v]] for u, v in graph.edges()
-    ]
+    weights = [model.tsp_graph.pheromone[u][v] for u, v in graph.edges()]
     # normalize the weights
     weights = [w / max(weights) for w in weights]
 
@@ -148,7 +144,7 @@ def build_page():
             make_graph,
         ],
         agent_portrayal=circle_portrayal_example,
-        play_interval=1,
+        play_interval=0,  # 1,
     )
 
 
