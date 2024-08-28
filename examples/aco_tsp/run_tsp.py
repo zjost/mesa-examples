@@ -35,7 +35,6 @@ def main():
 
     print(f"Best distance: {best_distance:.2f}")
     print(f"Best path: {best_path}")
-    # print(model.datacollector.get_model_vars_dataframe())
 
     _, ax = plt.subplots()
     ax.plot(results["best_distance"])

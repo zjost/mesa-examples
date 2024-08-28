@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import List, Optional
 
+import line_profiler
 import mesa
 import networkx as nx
 import numpy as np
@@ -22,6 +24,8 @@ class TSPGraph:
     def __init__(self, g: nx.Graph, pheromone_init: float = 1e-6):
         self.g = g
         self.pheromone_init = pheromone_init
+        self._cities = None
+        self._city2idx = None
         self._add_edge_properties()
 
     @property
@@ -30,19 +34,44 @@ class TSPGraph:
 
     @property
     def cities(self):
-        return list(self.g.nodes)
+        if self._cities is None:
+            self._cities = list(self.g.nodes)
+        return self._cities
+
+    @property
+    def city2idx(self):
+        if self._city2idx is None:
+            self._city2idx = {city: idx for idx, city in enumerate(self.cities)}
+        return self._city2idx
 
     @property
     def num_cities(self):
-        return len(self.g.nodes)
+        return len(self.cities)
+
+    @property
+    def visibility(self):
+        return self._visibility
+
+    @property
+    def pheromone(self):
+        return self._pheromone
 
     def _add_edge_properties(self):
+        self._visibility = np.zeros((self.num_cities, self.num_cities))
+        self._pheromone = (
+            np.ones((self.num_cities, self.num_cities)) * self.pheromone_init
+        )
+
         for u, v in self.g.edges():
             u_x, u_y = self.g.nodes[u]["pos"]
             v_x, v_y = self.g.nodes[v]["pos"]
-            self.g[u][v]["distance"] = ((u_x - v_x) ** 2 + (u_y - v_y) ** 2) ** 0.5
-            self.g[u][v]["visibility"] = 1 / self.g[u][v]["distance"]
-            self.g[u][v]["pheromone"] = self.pheromone_init
+            distance = ((u_x - v_x) ** 2 + (u_y - v_y) ** 2) ** 0.5
+            self.g[u][v]["distance"] = distance
+            self._visibility[self.city2idx[u]][self.city2idx[v]] = 1 / distance
+            self._visibility[self.city2idx[v]][self.city2idx[u]] = 1 / distance
+            # self.g[u][v]["visibility"] = 1 / self.g[u][v]["distance"]
+            # self.g[u][v]["int_distance"] = int(self.g[u][v]["distance"] + 0.5)
+            # self.g[u][v]["pheromone"] = self.pheromone_init
 
     @classmethod
     def from_random(cls, num_cities: int, seed: int = 0) -> "TSPGraph":
@@ -78,6 +107,49 @@ class TSPGraph:
         return cls(g, pheromone_init=pheromone_init)
 
 
+def compute_path_distance(path: List, g: nx.Graph, nint_flag: bool = False):
+    distance = 0
+    # Add the first city to the end to complete the round trip
+    round_trip = [*path, path[0]]
+    for i in range(len(round_trip) - 1):
+        city_start, city_end = round_trip[i], round_trip[i + 1]
+        if nint_flag:  # nint(x) = int(x + 0.5)
+            distance += int(g[city_start][city_end]["distance"] + 0.5)
+        else:
+            distance += g[city_start][city_end]["distance"]
+    return distance
+
+
+def three_opt(path, g):
+    best_path = path
+    best_distance = compute_path_distance(best_path, g)
+    for i in range(len(path) - 1):
+        k, el = path[i], path[i + 1]
+        for j in range(i + 2, len(path) - 1):
+            p, q = path[j], path[j + 1]
+            for t in range(j + 2, len(path) - 1):
+                r, s = path[t], path[t + 1]
+                if (
+                    g[k][q]["distance"] + g[p][s]["distance"] + g[r][el]["distance"]
+                    < g[k][el]["distance"] + g[p][q]["distance"] + g[r][s]["distance"]
+                ):
+                    # new_path = [...k] + [q, ..., r] + [l, ..., p] + [s, ...]
+                    new_path = (
+                        path[: i + 1]
+                        + path[j + 1 : t + 1]
+                        + path[i + 1 : j + 1]
+                        + path[t + 1 :]
+                    )
+                    assert len(new_path) == len(path)
+                    new_distance = compute_path_distance(path=new_path, g=g)
+                    if new_distance < best_distance:
+                        # print(f"Found a better path with distance {new_distance}")
+                        best_path = new_path
+                        best_distance = new_distance
+
+    return best_path
+
+
 class AntTSP(mesa.Agent):
     """
     An agent
@@ -91,6 +163,7 @@ class AntTSP(mesa.Agent):
         beta: float = 5.0,
         q_0: Optional[float] = None,
         aco_flag: bool = False,
+        three_opt_iters: int = 0,
     ):
         """
         Customize the agent
@@ -98,10 +171,11 @@ class AntTSP(mesa.Agent):
         self.unique_id = unique_id
         self._alpha = alpha
         self._beta = beta
-        self.q_0 = q_0
+        self._q_0 = q_0
         # Assert that either aco is False, or alpha == 1.0
         assert not aco_flag or alpha == 1.0, "alpha must be 1.0 for ACO"
         self.aco_flag = aco_flag
+        self.three_opt_iters = three_opt_iters
         super().__init__(unique_id, model)
         self._cities_visited = []
         self._traveled_distance = 0
@@ -124,27 +198,43 @@ class AntTSP(mesa.Agent):
     def beta(self, value):
         self._beta = value
 
+    @property
+    def q_0(self):
+        return self._q_0
+
+    @q_0.setter
+    def q_0(self, value):
+        self._q_0 = value
+
+    @line_profiler.profile
     def decide_next_city(self):
-        # Random
-        # new_city = self.random.choice(list(self.model.all_cities - set(self.cities_visited)))
-        # Choose closest city not yet visited
-        g = self.model.grid.G
+        pheromone = self.model.tsp_graph.pheromone
+        visibility = self.model.tsp_graph.visibility
+        city2idx = self.model.tsp_graph.city2idx
+
         current_city = self.pos
-        neighbors = list(g.neighbors(current_city))
+        # neighbors = list(g.neighbors(current_city))
+        neighbors = self.model.tsp_graph.cities
         candidates = [n for n in neighbors if n not in self._cities_visited]
+        candidates_idx = [city2idx[c] for c in candidates]
         if len(candidates) == 0:
             return current_city
 
         # p_ij(t) = 1/Z*[(tau_ij)**alpha * (1/distance)**beta]
-        results = []
-        for city in candidates:
-            val = (
-                (g[current_city][city]["pheromone"]) ** self.alpha
-                * (g[current_city][city]["visibility"]) ** self.beta
-            )
-            results.append(val)
+        # results = []
+        # for city in candidates:
+        #     val = (
+        #         (g[current_city][city]["pheromone"]) ** self.alpha
+        #         * (g[current_city][city]["visibility"]) ** self.beta
+        #     )
+        #     results.append(val)
 
-        results = np.array(results)
+        # results = np.array(results)
+        results = (
+            pheromone[city2idx[current_city]][candidates_idx] ** self.alpha
+            * visibility[city2idx[current_city]][candidates_idx] ** self.beta
+        )
+
         norm = results.sum()
         results /= norm
 
@@ -158,9 +248,35 @@ class AntTSP(mesa.Agent):
     def local_update(self, g, current_city, new_city):
         ro = self.model.ro
         tau_0 = self.model.tsp_graph.pheromone_init
-        g[current_city][new_city]["pheromone"] = (1 - ro) * g[current_city][new_city][
-            "pheromone"
-        ] + ro * tau_0
+
+        city2idx = self.model.tsp_graph.city2idx
+
+        # g[current_city][new_city]["pheromone"] = (1 - ro) * g[current_city][new_city][
+        #     "pheromone"
+        # ] + ro * tau_0
+
+        old_pheromone = self.model.tsp_graph.pheromone[city2idx[current_city]][
+            city2idx[new_city]
+        ]
+        new_pheromone = (1 - ro) * old_pheromone + ro * tau_0
+
+        self.model.tsp_graph._pheromone[city2idx[current_city], city2idx[new_city]] = (
+            new_pheromone
+        )
+        self.model.tsp_graph._pheromone[city2idx[new_city], city2idx[current_city]] = (
+            new_pheromone
+        )
+
+    def init_agent(self):
+        city = self.model.tsp_graph.cities[
+            self.model.random.randrange(self.model.num_cities)
+        ]
+        if self.pos:
+            self.model.grid.move_agent(self, city)
+        else:
+            self.model.grid.place_agent(self, city)
+        self._cities_visited = [city]
+        self._traveled_distance = 0
 
     def step(self):
         """
@@ -174,14 +290,25 @@ class AntTSP(mesa.Agent):
             new_city = self.decide_next_city()
             self._cities_visited.append(new_city)
             self.model.grid.move_agent(self, new_city)
-            self._traveled_distance += g[current_city][new_city]["distance"]
             if self.aco_flag:
                 self.local_update(g, current_city, new_city)
 
+        self._traveled_distance = compute_path_distance(
+            self._cities_visited, g, nint_flag=False
+        )
+
+        for _ in range(self.three_opt_iters):
+            new_path = three_opt(self._cities_visited, g)
+            new_distance = compute_path_distance(path=new_path, g=g, nint_flag=False)
+            if new_distance < self._traveled_distance:
+                self._cities_visited = new_path
+                self._traveled_distance = new_distance
+            else:
+                break
+
         self.tsp_solution = self._cities_visited.copy()
         self.tsp_distance = self._traveled_distance
-        self._cities_visited = []
-        self._traveled_distance = 0
+        self.init_agent()
 
 
 def calculate_pheromone_delta(
@@ -193,6 +320,10 @@ def calculate_pheromone_delta(
         results[(start_city, end_city)] = q / tsp_distance
 
     return results
+
+
+def extract_attr_fn(model, attr_name):
+    return getattr(model, attr_name, None)
 
 
 class AntSystemTspModel(mesa.Model):
@@ -237,13 +368,15 @@ class AntSystemTspModel(mesa.Model):
     ) -> None:
         for i in range(self.num_agents):
             agent = AntTSP(
-                unique_id=i, model=self, alpha=ant_alpha, beta=ant_beta, q_0=ant_q_0
+                unique_id=i,
+                model=self,
+                alpha=ant_alpha,
+                beta=ant_beta,
+                q_0=ant_q_0,
+                aco_flag=False,
             )
             self.schedule.add(agent)
-
-            city = self.tsp_graph.cities[self.random.randrange(self.num_cities)]
-            self.grid.place_agent(agent, city)
-            agent._cities_visited.append(city)
+            agent.init_agent()
 
     def initialize_data_collection(self) -> None:
         self.num_steps = 0
@@ -251,16 +384,18 @@ class AntSystemTspModel(mesa.Model):
         self.best_distance = float("inf")
         self.best_distance_iter = float("inf")
 
-        self.datacollector = mesa.datacollection.DataCollector(
+        self.datacollector = mesa.DataCollector(
             model_reporters={
-                "num_steps": "num_steps",
-                "best_distance": "best_distance",
-                "best_distance_iter": "best_distance_iter",
-                "best_path": "best_path",
+                "num_steps": partial(extract_attr_fn, attr_name="num_steps"),
+                "best_distance": partial(extract_attr_fn, attr_name="best_distance"),
+                "best_distance_iter": partial(
+                    extract_attr_fn, attr_name="best_distance_iter"
+                ),
+                "best_path": partial(extract_attr_fn, attr_name="best_path"),
             },
             agent_reporters={
-                "tsp_distance": "tsp_distance",
-                "tsp_solution": "tsp_solution",
+                "tsp_distance": partial(extract_attr_fn, attr_name="tsp_distance"),
+                "tsp_solution": partial(extract_attr_fn, attr_name="tsp_solution"),
             },
         )
 
@@ -300,10 +435,11 @@ class AntSystemTspModel(mesa.Model):
         """
         A model step. Used for collecting data and advancing the schedule
         """
-        self.datacollector.collect(self)
+        # self.datacollector.collect(self)
         self.schedule.step()
         self.num_steps += 1
         self.collect_data()
+        self.datacollector.collect(self)
         self.update_pheromone()
 
         if self.num_steps >= self.max_steps:
@@ -322,37 +458,40 @@ class ACOTspModel(AntSystemTspModel):
                 beta=ant_beta,
                 q_0=ant_q_0,
                 aco_flag=True,
+                three_opt_iters=0,
             )
             self.schedule.add(agent)
-
-            city = self.tsp_graph.cities[self.random.randrange(self.num_cities)]
-            self.grid.place_agent(agent, city)
-            agent._cities_visited.append(city)
+            agent.init_agent()
 
     def update_pheromone(self):
         # Global update of best path
         delta_tau_ij = calculate_pheromone_delta(
             self.best_path, self.best_distance, q=1.0
         )
+        city2idx = self.tsp_graph.city2idx
 
         for i, j in delta_tau_ij:
             # Evaporate
-            tau_ij = (1 - self.ro) * self.grid.G[i][j]["pheromone"]
+            # tau_ij = (1 - self.ro) * self.grid.G[i][j]["pheromone"]
+            tau_ij = (1 - self.ro) * self.tsp_graph.pheromone[city2idx[i]][city2idx[j]]
             # Add ant's contribution
             tau_ij += self.ro * delta_tau_ij[(i, j)]
 
-            self.grid.G[i][j]["pheromone"] = tau_ij
+            # self.grid.G[i][j]["pheromone"] = tau_ij
+            self.tsp_graph.pheromone[city2idx[i]][city2idx[j]] = tau_ij
+            self.tsp_graph.pheromone[city2idx[j]][city2idx[i]] = tau_ij
 
 
-class EvoAntTspModel(AntSystemTspModel):
+class EvoAntTspModel(ACOTspModel):
     def __init__(
         self,
         num_agents: int = 20,
         num_winners: int = 5,
         tsp_graph: TSPGraph = TSPGraph.from_random(20),
         max_steps: int = int(1e6),
-        alpha_mean: float = 1.0,
-        beta_mean: float = 5.0,
+        ro: float = 0.1,
+        q_0_mean: float = 0.9,
+        beta_mean: float = 2.0,
         noise_std: float = 1.0,
     ):
         # Call super of base's base class
@@ -368,10 +507,11 @@ class EvoAntTspModel(AntSystemTspModel):
         self.num_cities = tsp_graph.num_cities
         self.all_cities = set(range(self.num_cities))
         self.max_steps = max_steps
+        self.ro = ro
         self.schedule = mesa.time.RandomActivation(self)
         self.grid = mesa.space.NetworkGrid(tsp_graph.g)
 
-        self.alpha_mean = alpha_mean
+        self.q_0_mean = q_0_mean
         self.beta_mean = beta_mean
         self.noise_std = noise_std
         self.initialize_agents()
@@ -382,14 +522,18 @@ class EvoAntTspModel(AntSystemTspModel):
 
     def initialize_agents(self) -> None:
         for i in range(self.num_agents):
-            ant_alpha = np.random.normal(loc=self.alpha_mean, scale=0.1)
+            q_0 = np.random.normal(loc=self.q_0_mean, scale=0.1)
             ant_beta = np.random.normal(loc=self.beta_mean, scale=0.1)
-            agent = AntTSP(unique_id=i, model=self, alpha=ant_alpha, beta=ant_beta)
+            agent = AntTSP(
+                unique_id=i,
+                model=self,
+                alpha=1.0,
+                beta=ant_beta,
+                q_0=q_0,
+                aco_flag=True,
+            )
             self.schedule.add(agent)
-
-            city = self.tsp_graph.cities[self.random.randrange(self.num_cities)]
-            self.grid.place_agent(agent, city)
-            agent._cities_visited.append(city)
+            agent.init_agent()
 
     def initialize_data_collection(self) -> None:
         self.num_steps = 0
@@ -397,28 +541,32 @@ class EvoAntTspModel(AntSystemTspModel):
         self.best_distance = float("inf")
         self.best_distance_iter = float("inf")
 
-        self.datacollector = mesa.datacollection.DataCollector(
+        self.datacollector = mesa.DataCollector(
             model_reporters={
-                "num_steps": "num_steps",
-                "best_distance": "best_distance",
-                "best_distance_iter": "best_distance_iter",
-                "best_path": "best_path",
-                "alpha_mean_sample": "alpha_mean_sample",
-                "beta_mean_sample": "beta_mean_sample",
+                "num_steps": partial(extract_attr_fn, attr_name="num_steps"),
+                "best_distance": partial(extract_attr_fn, attr_name="best_distance"),
+                "best_distance_iter": partial(
+                    extract_attr_fn, attr_name="best_distance_iter"
+                ),
+                "best_path": partial(extract_attr_fn, attr_name="best_path"),
+                "q_0_mean_sample": partial(
+                    extract_attr_fn, attr_name="q_0_mean_sample"
+                ),
+                "beta_mean_sample": partial(
+                    extract_attr_fn, attr_name="beta_mean_sample"
+                ),
             },
             agent_reporters={
-                "tsp_distance": "tsp_distance",
-                "tsp_solution": "tsp_solution",
-                "alpha": "alpha",
-                "beta": "beta",
+                "tsp_distance": partial(extract_attr_fn, attr_name="tsp_distance"),
+                "tsp_solution": partial(extract_attr_fn, attr_name="tsp_solution"),
+                "q_0": partial(extract_attr_fn, attr_name="q_0"),
+                "beta": partial(extract_attr_fn, attr_name="beta"),
             },
         )
 
     def collect_data(self):
         super().collect_data()
-        self.alpha_mean_sample = np.mean(
-            [agent.alpha for agent in self.schedule.agents]
-        )
+        self.q_0_mean_sample = np.mean([agent.q_0 for agent in self.schedule.agents])
         self.beta_mean_sample = np.mean([agent.beta for agent in self.schedule.agents])
 
     def select_winners(self):
@@ -431,17 +579,18 @@ class EvoAntTspModel(AntSystemTspModel):
         for winner_idx, winner in enumerate(winning_agents):
             for off_idx in range(self.offspring_per_winner):
                 # Mutate: if parent mean is mean_p, then child mean is mean_c = mean_p + N(0, 1)
-                alpha = np.random.normal(loc=winner.alpha, scale=self.noise_std)
+                q_0 = np.clip(
+                    np.random.normal(loc=winner.q_0, scale=self.noise_std), 0, 1
+                )
                 beta = np.random.normal(loc=winner.beta, scale=self.noise_std)
                 agent_idx = winner_idx * self.offspring_per_winner + off_idx
                 # Update agent params
                 agent = self.schedule.agents[agent_idx]
-                agent.alpha = alpha
+                agent.q_0 = q_0
                 agent.beta = beta
 
     def step(self):
         super().step()
-        # self.update_agent_params()
         # Evolution
         winning_agents = self.select_winners()
         self.reproduce_and_mutate(winning_agents)

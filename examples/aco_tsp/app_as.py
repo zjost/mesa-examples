@@ -4,7 +4,7 @@ Configure visualization elements and instantiate a server
 
 import networkx as nx
 import solara
-from aco_tsp.model import ACOTspModel, TSPGraph  # AntSystemTspModel
+from aco_tsp.model import AntSystemTspModel, TSPGraph
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
 
@@ -13,11 +13,8 @@ def circle_portrayal_example(agent):
     return {"node_size": 20, "width": 0.1}
 
 
-# pheromone_init = 1/(n*Lnn)
-l_nn = 24_225
-pheromone_init = 1 / (100 * l_nn)
 tsp_graph = TSPGraph.from_tsp_file(
-    "aco_tsp/data/kroA100.tsp", pheromone_init=pheromone_init
+    "aco_tsp/data/kroA100.tsp",
 )
 model_params = {
     "num_agents": tsp_graph.num_cities,
@@ -38,14 +35,7 @@ model_params = {
         "max": 10.0,
         "step": 0.1,
     },
-    "ant_q_0": {
-        "type": "SliderFloat",
-        "value": 0.9,
-        "label": "q_0: probability of exploitation",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.1,
-    },
+    "ant_q_0": None,
 }
 
 
@@ -107,12 +97,16 @@ def ant_level_distances(model):
     pass
 
 
-page = SolaraViz(
-    # AntSystemTspModel,
-    ACOTspModel,
-    model_params,
-    space_drawer=None,
-    measures=["best_distance_iter", best_distance_from_optimal, make_graph],
-    agent_portrayal=circle_portrayal_example,
-    play_interval=1,
-)
+@solara.component
+def build_page():
+    return SolaraViz(
+        AntSystemTspModel,
+        model_params,
+        space_drawer=None,
+        measures=["best_distance_iter", best_distance_from_optimal, make_graph],
+        agent_portrayal=circle_portrayal_example,
+        play_interval=1,
+    )
+
+
+page = build_page()

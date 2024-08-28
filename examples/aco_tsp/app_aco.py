@@ -2,12 +2,9 @@
 Configure visualization elements and instantiate a server
 """
 
-from functools import partial
-
-import mesa
 import networkx as nx
 import solara
-from aco_tsp.model import EvoAntTspModel, TSPGraph
+from aco_tsp.model import ACOTspModel, TSPGraph  # AntSystemTspModel
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
 
@@ -16,34 +13,30 @@ def circle_portrayal_example(agent):
     return {"node_size": 20, "width": 0.1}
 
 
-tsp_graph = TSPGraph.from_tsp_file("aco_tsp/data/kroA100.tsp")
+# pheromone_init = 1/(n*Lnn)
+l_nn = 24_225
+pheromone_init = 1 / (100 * l_nn)
+tsp_graph = TSPGraph.from_tsp_file(
+    "aco_tsp/data/kroA100.tsp", pheromone_init=pheromone_init
+)
 model_params = {
     "num_agents": tsp_graph.num_cities,
     "tsp_graph": tsp_graph,
-    "num_winners": tsp_graph.num_cities // 5,
-    "q_0_mean": {
-        "type": "SliderFloat",
-        "value": 0.9,
-        "label": "q_0 mean: determinism threshold",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.1,
-    },
-    "beta_mean": {
+    "ant_beta": {
         "type": "SliderFloat",
         "value": 2.0,
-        "label": "Beta mean: heuristic exponent",
+        "label": "Beta: heuristic exponent",
         "min": 0.0,
         "max": 10.0,
         "step": 0.1,
     },
-    "noise_std": {
+    "ant_q_0": {
         "type": "SliderFloat",
-        "value": 0.1,
-        "label": "Mutation std",
+        "value": 0.9,
+        "label": "q_0: probability of exploitation",
         "min": 0.0,
         "max": 1.0,
-        "step": 0.01,
+        "step": 0.1,
     },
     "ro": {
         "type": "SliderFloat",
@@ -79,7 +72,7 @@ def best_distance_from_optimal(model):
         ylabel="Distance",
     )
     ax.plot(
-        model.datacollector.get_model_vars_dataframe()["best_distance"] - 21282,
+        model.datacollector.get_model_vars_dataframe()["best_distance"] - opt_distance,
         marker="o",
         ms=3,
     )
@@ -93,11 +86,7 @@ def make_graph(model):
     ax.set_title("Cities and pheromone trails")
     graph = model.grid.G
     pos = model.tsp_graph.pos
-    # weights = [graph[u][v]["pheromone"] for u, v in graph.edges()]
-    city2idx = model.tsp_graph.city2idx
-    weights = [
-        model.tsp_graph.pheromone[city2idx[u]][city2idx[v]] for u, v in graph.edges()
-    ]
+    weights = [graph[u][v]["pheromone"] for u, v in graph.edges()]
     # normalize the weights
     weights = [w / max(weights) for w in weights]
 
@@ -113,17 +102,6 @@ def make_graph(model):
     solara.FigureMatplotlib(fig)
 
 
-def make_histogram(model, param_name):
-    fig = Figure()
-    ax = fig.subplots()
-    ax.set_title(f"{param_name} histogram")
-    # Get last iteration's alpha values
-    parm_values = [getattr(agent, param_name) for agent in model.schedule.agents]
-    ax.hist(parm_values, bins=20, color="blue", alpha=0.7, rwidth=0.85)
-    ax.set(ylim=(0, model.num_agents), xlabel=param_name)
-    solara.FigureMatplotlib(fig)
-
-
 def ant_level_distances(model):
     # ant_distances = model.datacollector.get_agent_vars_dataframe()
     # Plot so that the step index is the x-axis, there's a line for each agent,
@@ -135,43 +113,13 @@ def ant_level_distances(model):
 @solara.component
 def build_page():
     return SolaraViz(
-        EvoAntTspModel,
+        ACOTspModel,
         model_params,
         space_drawer=None,
-        measures=[
-            "best_distance_iter",
-            best_distance_from_optimal,
-            "q_0_mean_sample",
-            "beta_mean_sample",
-            partial(make_histogram, param_name="q_0"),
-            partial(make_histogram, param_name="beta"),
-            make_graph,
-        ],
+        measures=["best_distance_iter", best_distance_from_optimal, make_graph],
         agent_portrayal=circle_portrayal_example,
         play_interval=1,
     )
 
 
 page = build_page()
-
-
-if __name__ == "__main__":
-    model_params = {
-        "num_agents": tsp_graph.num_cities,
-        "tsp_graph": tsp_graph,
-        "num_winners": tsp_graph.num_cities // 5,
-        "q_0_mean": 0.9,
-        "beta_mean": 2.0,
-        "noise_std": [0.01],  # , 0.05, 1.0],
-        "ro": 0.1,
-    }
-    results = mesa.batch_run(
-        EvoAntTspModel,
-        parameters=model_params,
-        iterations=1,
-        max_steps=20,
-        number_processes=1,
-        data_collection_period=1,
-        display_progress=True,
-    )
-    # pd.DataFrame(results).to_csv("evo_results_00.csv")
