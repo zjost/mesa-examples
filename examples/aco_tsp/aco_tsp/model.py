@@ -446,7 +446,6 @@ class ACOTspModel(AntSystemTspModel):
 
         for i, j in delta_tau_ij:
             # Evaporate
-            # tau_ij = (1 - self.ro) * self.grid.G[i][j]["pheromone"]
             tau_ij = (1 - self.ro) * self.tsp_graph.pheromone[i][j]
             # Add ant's contribution
             tau_ij += self.ro * delta_tau_ij[(i, j)]

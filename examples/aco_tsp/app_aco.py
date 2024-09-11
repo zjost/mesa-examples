@@ -41,7 +41,7 @@ model_params = {
     "ro": {
         "type": "SliderFloat",
         "value": 0.1,
-        "label": "ro: 1-evaporation rate",
+        "label": "ro: evaporation",
         "min": 0.0,
         "max": 1.0,
         "step": 0.1,
@@ -100,14 +100,6 @@ def make_graph(model):
     )
 
     solara.FigureMatplotlib(fig)
-
-
-def ant_level_distances(model):
-    # ant_distances = model.datacollector.get_agent_vars_dataframe()
-    # Plot so that the step index is the x-axis, there's a line for each agent,
-    # and the y-axis is the distance traveled
-    # ant_distances['tsp_distance'].unstack(level=1).plot(ax=ax)
-    pass
 
 
 @solara.component

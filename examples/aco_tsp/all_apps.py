@@ -5,7 +5,6 @@ Configure visualization elements and instantiate a server
 import solara
 from app_aco import build_page as build_aco_page
 from app_as import build_page as build_as_page
-from app_evo import build_page as build_evo_page
 
 # read README.md into a string
 with open("README.md") as f:
@@ -23,5 +22,4 @@ routes = [
         component=build_aco_page,
         label="Ant Colony Optimization",
     ),
-    solara.Route(path="evo", component=build_evo_page, label="Evo"),
 ]
